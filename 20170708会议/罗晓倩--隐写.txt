@@ -1,0 +1,11 @@
+简单的隐写：
+1.
+将文档压缩成zip文件
+
+打开cmd,cd到图片的位置执行copy /d xx.jpg + xx.zip  new.jpg(另存为的名字）
+
+将new.jpg点击属性，将后缀改为.zip。解压打开即可
+
+2.Opanda PowerExif 修改元数据
+
+3.Jphswin 隐藏文件open jpeg->hide->save as

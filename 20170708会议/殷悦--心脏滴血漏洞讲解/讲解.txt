@@ -1,0 +1,30 @@
+心脏滴血漏洞讲解
+
+介绍：
+	Openssl安全协议是一个强大的安全套接字层密码库，包括了主要的密码算法、常用的密钥和证书封装管理功能以及SSL协议，并提供了丰富的应用程序供测试或其它目的的使用。
+应用：
+	他是一个开源的库，有好多版本，开发者直接调他的API可实现加密功能，他广泛应用与网页服务和好多应用中，https便是其中最常见的一个。
+
+影响：
+	2014年，OpenSSL大漏洞爆发，人们后来称其为 心脏滴血。利用该漏洞黑客可以任意获取https开头的网址的信息，包括网银，网购，Emil，还有一些防火墙VPN。
+
+原理：
+	OpenSSL在TLS和DTLS心跳处理时，存在编码缺陷。OpenSSL未检测心跳包中的字符长度是否和后续的数据字段符合。攻击者利用这一点构造异常数据包来获取心跳数据所在的内存区的后续数据，每次读取数据多达64K。
+测试的Python脚本：
+https://gist.github.com/RixTox/10222402
+
+使用方法：
+Usage: ssltest.py server [options]
+Test for SSL heartbeat vulnerability (CVE-2014-0160)
+Options:
+  -h, --help            show this help message and exit
+  -p PORT, --port=PORT  TCP port to test (default: 443)
+
+源码分析：
+      该漏洞主要是内存泄露问题，而根本上是因为OpenSSL在处理心跳请求包时，没有对length字段（占2byte，可以标识的数据长度为64KB）和后续的data字段做合规检测。生成心跳响应包时，直接用了length对应的长度，从堆空间申请了内存，既便是真正的请求data数据远远小于length标识的长度。
+
+演示视频：
+http://www.iqiyi.com/w_19rsrh1uip.html
+
+来源：
+http://hetianlab.com/expc.do?ec=ECID172.19.104.182014042308593200001

